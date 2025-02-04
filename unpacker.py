@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import os.path
 import zipfile
@@ -15,7 +15,7 @@ class Unpacker(object):
    # 
    #--------------------------------------------------------------------------
    def entropy(self, length):
-       return ''.join(random.choice(string.lowercase) for i in range (length))
+       return ''.join(random.choice(string.ascii_lowercase) for i in range (length))
 
    #--------------------------------------------------------------------------
    # 
@@ -33,8 +33,8 @@ class Unpacker(object):
 
         with zipfile.ZipFile(file, 'r') as zip:
             files = [item.filename for item in zip.infolist()]
-            datfilename = [m.group(0) for f in files for m in [re.search('.*\.dat', f)] if m].pop()
-            binfilename = [m.group(0) for f in files for m in [re.search('.*\.bin', f)] if m].pop()
+            datfilename = [m.group(0) for f in files for m in [re.search(r'.*\.dat', f)] if m].pop()
+            binfilename = [m.group(0) for f in files for m in [re.search(r'.*\.bin', f)] if m].pop()
 
             zip.extractall(r'{0}'.format(self.unzip_dir))
 

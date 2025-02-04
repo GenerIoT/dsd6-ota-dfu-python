@@ -1,6 +1,7 @@
 import os
 import pexpect
 import re
+import binascii
 
 from abc   import ABCMeta, abstractmethod
 from array import array
@@ -8,10 +9,7 @@ from util  import *
 
 verbose = False
 
-class NrfBleDfuController(object):
-    __metaclass__ = ABCMeta
-
-    # Class instance variables
+class NrfBleDfuController(object, metaclass=ABCMeta):
     ctrlpt_handle        = 0
     ctrlpt_cccd_handle   = 0
     data_handle          = 0
@@ -62,7 +60,7 @@ class NrfBleDfuController(object):
         self.datfile_path = datfile_path
 
         self.ble_conn = pexpect.spawn("gatttool -b '%s' -t random --interactive" % target_mac)
-        self.ble_conn.delaybeforesend = 0
+        self.ble_conn.delaybeforesend = 2
 
     # --------------------------------------------------------------------------
     #  Start the firmware update process
@@ -72,15 +70,15 @@ class NrfBleDfuController(object):
         (_, self.data_handle, _) = self._get_handles(self.UUID_PACKET)
 
         if verbose:
-            print 'Control Point Handle: 0x%04x, CCCD: 0x%04x' % (self.ctrlpt_handle, self.ctrlpt_cccd_handle)
-            print 'Packet handle: 0x%04x' % (self.data_handle)
+            print('Control Point Handle: 0x%04x, CCCD: 0x%04x' % (self.ctrlpt_handle, self.ctrlpt_cccd_handle))
+            print('Packet handle: 0x%04x' % (self.data_handle))
 
         # Subscribe to notifications from Control Point characteristic
         self._enable_notifications(self.ctrlpt_cccd_handle)
 
         # Set the Packet Receipt Notification interval
         prn = uint16_to_bytes_le(self.pkt_receipt_interval)
-        self._dfu_send_command(Procedures.SET_PRN, prn)
+        self._dfu_send_command(0x02, prn)
 
         self._dfu_send_init()
 
@@ -92,7 +90,7 @@ class NrfBleDfuController(object):
     #    Bin: read binfile into bin_array
     # --------------------------------------------------------------------------
     def input_setup(self):
-        print "Sending file " + os.path.split(self.firmware_path)[1] + " to " + self.target_mac
+        print("Sending file " + os.path.split(self.firmware_path)[1] + " to " + self.target_mac)
 
         if self.firmware_path == None:
             raise Exception("input invalid")
@@ -101,18 +99,19 @@ class NrfBleDfuController(object):
 
         if extent == ".bin":
             self.bin_array = array('B', open(self.firmware_path, 'rb').read())
-
             self.image_size = len(self.bin_array)
-            print "Binary imge size: %d" % self.image_size
-            print "Binary CRC32: %d" % crc32_unsigned(array_to_hex_string(self.bin_array))
+            print("Binary image size: %d" % self.image_size)
 
+            # Compute CRC32 using binascii and print it
+            crc32_value = binascii.crc32(self.bin_array.tobytes()) & 0xFFFFFFFF
+            print("Binary CRC32: %d" % crc32_value)
             return
 
         if extent == ".hex":
-            intelhex = IntelHex(self.firmware_path)
+            intelhex = intelhex(self.firmware_path)
             self.bin_array = intelhex.tobinarray()
             self.image_size = len(self.bin_array)
-            print "bin array size: ", self.image_size
+            print("bin array size: ", self.image_size)
             return
 
         raise Exception("input invalid")
@@ -121,27 +120,36 @@ class NrfBleDfuController(object):
     # Perform a scan and connect via gatttool.
     # Will return True if a connection was established, False otherwise
     # --------------------------------------------------------------------------
-    def scan_and_connect(self, timeout=2, mtu=185):
-        if verbose: print "scan_and_connect"
+    def scan_and_connect(self, timeout=10, mtu=185):
+        if verbose: print("scan_and_connect")
 
-        print "Connecting to %s" % (self.target_mac)
+        print("Connecting to %s" % (self.target_mac))
 
         try:
-            self.ble_conn.expect('\[LE\]>', timeout=timeout)
-        except pexpect.TIMEOUT, e:
+            self.ble_conn.expect(r'\[LE\]>', timeout=timeout)
+        except pexpect.TIMEOUT as e:
+            print("123")
             return False
+        
+        print("send connect")
 
         self.ble_conn.sendline('connect')
 
         try:
-            res = self.ble_conn.expect('.*Connection successful.*', timeout=timeout)
-        except pexpect.TIMEOUT, e:
+            res = self.ble_conn.expect(r'.*Connection successful.*', timeout=timeout)
+        except pexpect.TIMEOUT as e:
+            #print("ble_conn output before matching:", self.ble_conn.before.decode('utf-8', errors='ignore'))
+            #print("ble_conn output that matched (if any):", self.ble_conn.after.decode('utf-8', errors='ignore'))
             return False
         if mtu>23:
             #MTU negotiation
             self.ble_conn.sendline('mtu %d' % mtu)
             res=self.ble_conn.expect('.*MTU was exchanged successfully: (.+)\r.*', timeout=timeout)
-            res=re.findall('.*MTU was exchanged successfully: (.+)\r.*',self.ble_conn.after)
+            after_output = self.ble_conn.after.decode('utf-8', errors='ignore')
+
+            # Now use the string pattern in re.findall
+            res = re.findall(r'.*MTU was exchanged successfully: (.+)\r.*', after_output)
+
             self.mtu=int(res[0])
         else:
             self.mtu=mtu
@@ -173,10 +181,12 @@ class NrfBleDfuController(object):
         self.ble_conn.sendline('characteristics')
 
         try:
-            self.ble_conn.expect([uuid], timeout=2)
-            handles = re.findall('.*handle: (0x....),.*char value handle: (0x....)', self.ble_conn.before)
+            self.ble_conn.expect([uuid], timeout=5)
+            before_output = self.ble_conn.before.decode('utf-8', errors='ignore')
+
+            handles = re.findall('.*handle: (0x....),.*char value handle: (0x....)', before_output)
             (handle, value_handle) = handles[-1]
-        except pexpect.TIMEOUT, e:
+        except pexpect.TIMEOUT as e:
             raise Exception("UUID not found: {}".format(uuid))
 
         return (int(handle, 16), int(value_handle, 16), int(value_handle, 16)+1)
@@ -186,62 +196,87 @@ class NrfBleDfuController(object):
     #  Example format: "Notification handle = 0x0019 value: 10 01 01"
     # --------------------------------------------------------------------------
     def _dfu_wait_for_notify(self):
-        while True:
-            if verbose: print "dfu_wait_for_notify"
+        try:
+            while True:
+                if verbose: print("dfu_wait_for_notify")
 
-            if not self.ble_conn.isalive():
-                print "connection not alive"
-                return None
+                if not self.ble_conn.isalive():
+                    print("connection not alive")
+                    return None
 
-            try:
-                index = self.ble_conn.expect('Notification handle = .*? \r\n', timeout=5)
+                try:
 
-            except pexpect.TIMEOUT:
-                #
-                # The gatttool does not report link-lost directly.
-                # The only way found to detect it is monitoring the prompt '[CON]'
-                # and if it goes to '[   ]' this indicates the connection has
-                # been broken.
-                # In order to get a updated prompt string, issue an empty
-                # sendline('').  If it contains the '[   ]' string, then
-                # raise an exception. Otherwise, if not a link-lost condition,
-                # continue to wait.
-                #
-                self.ble_conn.sendline('')
-                string = self.ble_conn.before
-                if '[   ]' in string:
-                    print 'Connection lost! '
-                    raise Exception('Connection Lost')
-                return None
+                    # Oma viritys, en tiedä onko tuo data tuolla se mitä odotetaan vai eikö sitä vaan kuulu...
+                    #received_string = self.ble_conn.after.decode('utf-8', errors='ignore')  # Decode bytes to string
 
-            if index == 0:
-                after = self.ble_conn.after
-                hxstr = after.split()[3:]
-                handle = long(float.fromhex(hxstr[0]))
-                return hxstr[2:]
+                    # Regular expression to match the notification handle and value
+                    #pattern = r'Notification handle = (0x[0-9a-fA-F]+) value: (.*)'
 
-            else:
-                print "unexpeced index: {0}".format(index)
-                return None
+                    # Search for the pattern in the received string
+                    #match = re.search(pattern, received_string)
+                    
+                    #if match:
+                    #    value = match.group(2)    # Extract the corresponding value
+                    #    value_list = value.split() 
+                    #
+                    #    print(f"Value: {value_list}")
+                    #   return value_list
+                    # Oma viritys loppuu
+
+                    index = self.ble_conn.expect('Notification handle = .*? \r\n', timeout=1)
+
+                except pexpect.TIMEOUT:
+                    
+                    #
+                    # The gatttool does not report link-lost directly.
+                    # The only way found to detect it is monitoring the prompt '[CON]'
+                    # and if it goes to '[   ]' this indicates the connection has
+                    # been broken.
+                    # In order to get a updated prompt string, issue an empty
+                    # sendline('').  If it contains the '[   ]' string, then
+                    # raise an exception. Otherwise, if not a link-lost condition,
+                    # continue to wait.
+                    #
+                    self.ble_conn.sendline('')
+                    string = self.ble_conn.before.decode('utf-8', errors='ignore')  # Decode bytes to string
+                    print("string: {0}".format(string))
+                    if '[   ]' in string:
+                        print('Connection lost! ')
+                        raise Exception('Connection Lost')
+                    continue
+                    
+
+                if index == 0:
+                    after = self.ble_conn.after.decode('utf-8')
+                    print("after: {0}".format(after))
+                    hxstr = after.split()[3:]
+                    handle = int(float.fromhex(hxstr[0]))
+                    return hxstr[2:]
+
+                else:
+                    print("unexpeced index: {0}".format(index))
+                    return None
+        except Exception as e:
+            print("(dfu wait for notify) Exception at line {}: {}".format(sys.exc_info()[2].tb_lineno, e))
 
     # --------------------------------------------------------------------------
     #  Send a procedure + any parameters required
     # --------------------------------------------------------------------------
     def _dfu_send_command(self, procedure, params=[]):
-        if verbose: print '_dfu_send_command'
+        if verbose: print('_dfu_send_command')
 
         cmd  = 'char-write-req 0x%04x %02x' % (self.ctrlpt_handle, procedure)
         cmd += array_to_hex_string(params)
 
-        if verbose: print cmd
+        if verbose: print(cmd)
 
         self.ble_conn.sendline(cmd)
 
         # Verify that command was successfully written
         try:
             res = self.ble_conn.expect('Characteristic value was written successfully.*', timeout=10)
-        except pexpect.TIMEOUT, e:
-            print "State timeout"
+        except pexpect.TIMEOUT as e:
+            print("State timeout")
 
     # --------------------------------------------------------------------------
     #  Send an array of bytes
@@ -251,7 +286,7 @@ class NrfBleDfuController(object):
         cmd += ' '
         cmd += array_to_hex_string(data)
 
-        if verbose: print cmd
+        if verbose: print(cmd)
 
         self.ble_conn.sendline(cmd)
 
@@ -259,16 +294,16 @@ class NrfBleDfuController(object):
     #  Enable notifications from the Control Point Handle
     # --------------------------------------------------------------------------
     def _enable_notifications(self, cccd_handle):
-        if verbose: print '_enable_notifications'
+        if verbose: print('_enable_notifications')
 
         cmd  = 'char-write-req 0x%04x %s' % (cccd_handle, '0100')
 
-        if verbose: print cmd
+        if verbose: print(cmd)
 
         self.ble_conn.sendline(cmd)
 
         # Verify that command was successfully written
         try:
             res = self.ble_conn.expect('Characteristic value was written successfully.*', timeout=10)
-        except pexpect.TIMEOUT, e:
-            print "State timeout"
+        except pexpect.TIMEOUT as e:
+            print("State timeout")
